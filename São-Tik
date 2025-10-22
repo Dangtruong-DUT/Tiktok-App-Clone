@@ -1,0 +1,164 @@
+tiktok-stm/
+├─ backend/
+│  ├─ src/
+│  │  ├─ index.js
+│  │  ├─ config.js
+│  │  ├─ models/
+│  │  │  ├─ index.js
+│  │  │  ├─ user.js
+│  │  │  ├─ video.js
+│  │  │  ├─ like.js
+│  │  │  └─ comment.js
+│  │  ├─ routes/
+│  │  │  ├─ auth.js
+│  │  │  ├─ videos.js
+│  │  │  └─ users.js
+│  │  ├─ middleware/
+│  │  │  └─ auth.js
+│  │  └─ workers/
+│  │     └─ videoWorker.js
+│  ├─ Dockerfile
+│  └─ package.json
+├─ mobile/
+│  ├─ App.js
+│  ├─ package.json
+│  └─ src/
+│     ├─ screens/
+│     │  ├─ FeedScreen.js
+│     │  ├─ UploadScreen.js
+│     │  └─ ProfileScreen.js
+│     └─ components/
+│        └─ VideoCard.js
+├─ docker-compose.yml
+└─ README.md
+{
+  "name": "stm-backend",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "worker": "node src/workers/videoWorker.js"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1330.0",
+    "bcrypt": "^5.1.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.1.4",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "pg": "^8.10.0",
+    "sequelize": "^6.32.1",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
+PORT=4000
+DATABASE_URL=postgres://postgres:postgres@db:5432/stmdb
+JWT_SECRET=change_this_to_a_strong_secret
+AWS_BUCKET=my-bucket
+AWS_REGION=eu-west-1
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+S3_BASE_URL=https://my-bucket.s3.amazonaws.com
+require('dotenv').config();
+
+module.exports = {
+  port: process.env.PORT || 4000,
+  databaseUrl: process.env.DATABASE_URL,
+  jwtSecret: process.env.JWT_SECRET || 'secret',
+  aws: {
+    bucket: process.env.AWS_BUCKET,
+    region: process.env.AWS_REGION,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    s3BaseUrl: process.env.S3_BASE_URL
+  }
+};const { Sequelize } = require('sequelize');
+const config = require('../config');
+
+const sequelize = new Sequelize(config.databaseUrl, {
+  logging: false
+});
+
+const User = require('./user')(sequelize);
+const Video = require('./video')(sequelize);
+const Like = require('./like')(sequelize);
+const Comment = require('./comment')(sequelize);
+
+User.hasMany(Video, { foreignKey: 'authorId' });
+Video.belongsTo(User, { foreignKey: 'authorId' });
+
+User.belongsToMany(Video, { through: Like, as: 'LikedVideos', foreignKey: 'userId' });
+Video.belongsToMany(User, { through: Like, as: 'Likers', foreignKey: 'videoId' });
+
+
+Video.hasMany(Comment, { foreignKey: 'videoId' });
+Comment.belongsTo(Video, { foreignKey: 'videoId' });
+
+const { DataTypes } = require('sequelize');
+module.exports = (sequelize) => sequelize.define('User', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  email: { type: DataTypes.STRING, unique: true },
+  username: { type: DataTypes.STRING, unique: true },
+  passwordHash: { type: DataTypes.STRING },
+  displayName: { type: DataTypes.STRING },
+  bio: { type: DataTypes.TEXT },
+  avatarUrl: { type: DataTypes.TEXT },
+  locationCity: { type: DataTypes.STRING },
+  isCreator: { type: DataTypes.BOOLEAN, defaultValue: true },
+  createdAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
+  updatedAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
+});import React, { useState } from 'react';
+import { View, Button, TextInput, Text } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import axios from 'axios';
+import * as FileSystem from 'expo-file-system';
+
+const API = 'http://10.0.2.2:4000'; // adjust
+
+export default function UploadScreen({ navigation }) {
+  const [file, setFile] = useState(null);
+  const [title, setTitle] = useState('');
+
+  async function pickVideo() {
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Videos });
+    if (!res.cancelled) setFile(res);
+  }
+
+  async function upload() {
+    if (!file) return alert('Choisis une vidéo');
+    const token = await getToken();
+    const filename = file.uri.split('/').pop();
+    const mime = 'video/mp4'; // approximated; could be file.type
+
+    // get presigned
+    const pres = await axios.post(`${API}/videos/presign`, { filename, contentType: mime }, { headers: { Authorization: `Bearer ${token}` }});
+    const uploadUrl = pres.data.uploadUrl;
+    // read file
+    const fileBlob = await FileSystem.readAsStringAsync(file.uri, { encoding: FileSystem.EncodingType.Base64 });
+    const binary = atob(fileBlob); // note: environment differences — may need fetch blob method
+    // simpler: use fetch to upload
+    const fileData = await fetch(file.uri);
+    const blob = await fileData.blob();
+    await fetch(uploadUrl, { method:'PUT', body: blob, headers: { 'Content-Type': mime }});
+    // create record
+    await axios.post(`${API}/videos`, { s3Key: pres.data.key, title }, { headers: { Authorization: `Bearer ${token}` }});
+    alert('Upload fait, traitement en cours');
+    navigation.goBack();
+  }
+
+  return (
+    <View style={{ padding: 20 }}>
+      <Button title="Choisir une vidéo" onPress={pickVideo} />
+      {file && <Text>Fichier: {file.uri}</Text>}
+      <TextInput placeholder="Titre" value={title} onChangeText={setTitle} style={{ borderWidth:1, marginVertical:10, padding:8 }} />
+      <Button title="Uploader" onPress={upload} />
+    </View>
+  );
+}
+module.exports = { sequelize, User, Video, Like, Comment };
